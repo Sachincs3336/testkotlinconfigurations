@@ -1,0 +1,4 @@
+rootProject.name='TestKotlinConfigurations'
+include ':app'
+include ':common'
+include ':iap'

@@ -1,0 +1,177 @@
+/**
+ *  File: nonnull.gradle
+ *
+ *  Generates package-info.java for appropriate packages
+ *  inside main src, test and androidTest folders.
+ *
+ *  Idea was taken from following sources:
+ *  https://medium.com/square-corner-blog/non-null-is-the-default-58ffc0bb9111
+ *  https://stackoverflow.com/a/40091450
+ *
+ *  and was updated to create the files in build/generated/source/nonnull, instead of in the actual git sourceTree.
+ */
+
+
+class GenerateNonNullJavaFilesTask extends DefaultTask {
+
+    GenerateNonNullJavaFilesTask() {
+        setup()
+    }
+
+    private Map<String, List<SourceDirectory>> directories = [:]
+    private boolean hasSetup;
+
+    @InputFiles
+    def FileCollection inputDirectories
+
+    @OutputDirectory
+    File outputDirectory = project.file("${project.buildDir}/generated/source/nonnull")
+
+    void generateForChange(File changed) {
+        directories.each { k, listOfSourceDirectories ->
+            listOfSourceDirectories.each { sourceD ->
+                def item = sourceD.outputs.get(changed)
+                if (item != null) {
+                    item.write()
+                }
+            }
+        }
+    }
+
+    @TaskAction
+    void generatePackageInfo(IncrementalTaskInputs inputs) {
+        // Run the setup so that the task scans and attaches to the Android source sets
+        setup()
+        inputs.outOfDate { change ->
+            generateForChange(change.file)
+        }
+    }
+
+    void setup() {
+        if (hasSetup) {
+            return
+        }
+
+        searchForDirectories(project.android.sourceSets.main.java.srcDirs, "main")
+        searchForDirectories(project.android.sourceSets.test.java.srcDirs, "test")
+        searchForDirectories(project.android.sourceSets.androidTest.java.srcDirs, "androidTest")
+
+        project.android.sourceSets.main.java.srcDirs += new File(outputDirectory, "main")
+        project.android.sourceSets.test.java.srcDirs += new File(outputDirectory, "test")
+        project.android.sourceSets.androidTest.java.srcDirs += new File(outputDirectory, "androidTest")
+
+        ConfigurableFileCollection fileCollection = project.files()
+        // Sort because we want to use these as stable (ie. cache-key-ready) values
+        directories.each { k, listOfSourceDirectory ->
+            listOfSourceDirectory.each { sourceD ->
+                sourceD.outputs.each { dir, outFile ->
+                    fileCollection.from(dir)
+                }
+            }
+        }
+        inputDirectories = fileCollection
+
+        hasSetup = true
+    }
+
+    void searchForDirectories(srcDirs, nameOfSet) {
+        List<SourceDirectory> scannedDirectories = []
+        srcDirs.each { sourceDir ->
+            if (sourceDir.exists()) {
+                scannedDirectories.add(new SourceDirectory(nameOfSet, sourceDir))
+            }
+        }
+        directories[nameOfSet] = scannedDirectories
+    }
+
+    static String getFileContentPackage(String packageName) {
+        return "package $packageName;\n"
+    }
+
+    static String getFileContentHeader() {
+        return  "/**\n" +
+                " *\n" +
+                " * Make all method parameters @NonNull by default.\n" +
+                " *\n" +
+                " * We assume that all method parameters and return types are NON-NULL by default.\n" +
+                " *\n" +
+                " */\n" +
+                "@com.example.common.util.NonnullByDefault\n"
+    }
+
+    static def hasFiles(File dir) {
+        if (!dir.directory) {
+            return false
+        }
+        for (File file : dir.listFiles()) {
+            if (!file.directory) {
+                return true
+            }
+        }
+        return false
+    }
+
+    private class NonNullOutputFile {
+        File sourceDirectory
+        File destinationFile
+        String packageName
+        SourceDirectory owner
+
+        NonNullOutputFile(SourceDirectory owner, File dir, String name) {
+            if (dir == null) {
+                throw new RuntimeException()
+            }
+            this.packageName = name
+            this.sourceDirectory = dir
+            this.owner = owner
+
+            File destinationDirectory = project.file("${project.buildDir}/generated/source/nonnull/${owner.setName}/${packageName.replace('.', File.separator)}")
+            destinationFile = new File(destinationDirectory, "package-info.java")
+        }
+
+        void write() {
+            if (!destinationFile.parentFile.exists() && !destinationFile.parentFile.mkdirs()) {
+                throw new TaskExecutionException(GenerateNonNullJavaFilesTask.this, new IOException("Unable to create directory: ${destinationFile.parentFile}"))
+            }
+
+            def infoFileContentPackage = getFileContentPackage(packageName)
+            destinationFile.write(getFileContentHeader() + infoFileContentPackage + "\n")
+        }
+    }
+
+    private class SourceDirectory {
+
+        Map<File, NonNullOutputFile> outputs = [:]
+        File root
+        String setName
+
+        SourceDirectory(String name, File rootDir) {
+            setName = name
+            root = rootDir
+            rootDir.eachDir { dir ->
+                searchRecursive(dir, null)
+            }
+        }
+
+        void searchRecursive(File dir, String parentPackage) {
+            def packageName = parentPackage == null ? dir.name : parentPackage + ".$dir.name"
+            if (hasFiles(dir)) {
+                NonNullOutputFile file = new NonNullOutputFile(this, dir, packageName)
+                outputs[dir] = file
+            }
+
+            dir.eachDir { subDir ->
+                searchRecursive(subDir, packageName)
+            }
+        }
+    }
+}
+
+ext.generateNonNullJavaFiles = tasks.register("generateNonNullJavaFiles", GenerateNonNullJavaFilesTask) {
+    group = "Copying"
+    description = "Generate package-info.java classes"
+}
+
+tasks.named("preBuild").configure {
+    dependsOn generateNonNullJavaFiles
+}
